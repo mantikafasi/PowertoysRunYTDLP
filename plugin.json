@@ -1,0 +1,14 @@
+{
+  "ID": "323D66BA5A384DA3A443F5302B10CC3D",
+  "ActionKeyword": "ytdlp",
+  "IsGlobal": false,
+  "Name": "YTDLP",
+  "Author": "hlaueriksson",
+  "Version": "0.87.0",
+  "Language": "csharp",
+  "Website": "https://github.com/hlaueriksson/Community.PowerToys.Run.Plugin.YTDLP",
+  "ExecuteFileName": "Community.PowerToys.Run.Plugin.YTDLP.dll",
+  "IcoPathDark": "Images\\ytdlp.dark.png",
+  "IcoPathLight": "Images\\ytdlp.light.png",
+  "DynamicLoading": true
+}
