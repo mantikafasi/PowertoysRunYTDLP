@@ -1,8 +1,11 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
 using ManagedCommon;
+using Microsoft.PowerToys.Settings.UI.Library;
 using Microsoft.Toolkit.Uwp.Notifications;
 using Wox.Plugin;
 using Wox.Plugin.Logger;
@@ -23,9 +26,17 @@ internal class ContextData
 /// <summary>
 ///     Main class of this plugin that implement all used interfaces.
 /// </summary>
-public class Main : IPlugin, IContextMenu, IDisposable, IDelayedExecutionPlugin
+public class Main : IPlugin, IContextMenu, IDisposable, IDelayedExecutionPlugin, ISettingProvider
 {
+    private readonly CancellationTokenSource _cts = new();
     private readonly YoutubeDL ytdl = new();
+    private string? _currentFileName = "";
+    private string? _currentUrl = "";
+
+
+    private Task<RunResult<VideoData>>? _fetchTask;
+
+    private bool _isWaiting;
 
     /// <summary>
     ///     ID of the plugin.
@@ -69,30 +80,36 @@ public class Main : IPlugin, IContextMenu, IDisposable, IDelayedExecutionPlugin
 
     public List<Result> Query(Query query, bool delayedExecution)
     {
-        if (string.IsNullOrEmpty(query.Search)) return [];
+        if (_fetchTask != null)
+        {
+            if (!_fetchTask.IsCanceled && !_fetchTask.IsCompleted && !_isWaiting)
+            {
+                _isWaiting = true;
+                _fetchTask.Wait();
+                _isWaiting = false;
+            }
+        }
+        else
+        {
+            return [];
+        }
 
         try
         {
-            var search = query.Search;
-            var task = Task.Run(() => ytdl.RunVideoDataFetch(search,
-                overrideOptions: new OptionSet { FormatSort = "quality, hasvid, hasaudio, fps" }));
-            task.Wait();
-
-
-            if (!task.Result.Success)
+            if (!_fetchTask.Result.Success)
                 return
                 [
-                    GetResult("An error occured while fetching URL", "Please check the URL and try again")
+                    GetResult(query.Search, "An error occured while fetching URL", "Please check the URL and try again")
                 ];
 
             var results = new List<Result>();
 
-            var formatsData = task.Result.Data.Formats.ToList();
+            var formatsData = _fetchTask.Result.Data.Formats.ToList();
             formatsData.Add(new FormatData
             {
                 Format = "Best Video+Audio",
                 FormatId = "bestvideo+bestaudio/best",
-                Url = task.Result.Data.Url
+                Url = _fetchTask.Result.Data.Url
             });
 
             formatsData.Reverse();
@@ -102,21 +119,27 @@ public class Main : IPlugin, IContextMenu, IDisposable, IDelayedExecutionPlugin
             {
                 results.Add(new Result
                 {
+                    QueryTextDisplay = query.Search,
                     Score = formatsData.Count - i,
-                    QueryTextDisplay = search,
                     IcoPath = IconPath,
-                    Title = "" + task.Result.Data.Title,
+                    Title = "" + _fetchTask.Result.Data.Title,
                     SubTitle = "Quality:" + res.Format,
-                    ToolTipData = new ToolTipData(task.Result.Data.Title, res.Format),
+                    ToolTipData = new ToolTipData(_fetchTask.Result.Data.Title, res.Format),
                     Action = _ =>
                     {
-                        DownloadVideo(task.Result.Data.Title, task.Result.Data.Url, res.FormatId);
+                        _cts.Cancel();
+
+
+                        DownloadVideo(
+                            string.IsNullOrEmpty(_currentFileName) ? _fetchTask.Result.Data.Title : _currentFileName,
+                            _currentUrl!, res.FormatId);
+                        _fetchTask = null;
                         return true;
                     },
                     ContextData = new ContextData
                     {
                         format = res.Format,
-                        url = task.Result.Data.Url
+                        url = _fetchTask.Result.Data.Url
                     }
                 });
                 i++;
@@ -127,9 +150,11 @@ public class Main : IPlugin, IContextMenu, IDisposable, IDelayedExecutionPlugin
         catch (Exception e)
         {
             Log.Exception("error", e, GetType());
+
+            if (e is AggregateException) return [];
             return
             [
-                GetResult("An error occured while fetching URL", e.ToString())
+                GetResult(query.Search, "An error occured while fetching URL", e.ToString())
             ];
         }
     }
@@ -142,6 +167,67 @@ public class Main : IPlugin, IContextMenu, IDisposable, IDelayedExecutionPlugin
     }
 
     /// <summary>
+    ///     Return a filtered list, based on the given query.
+    /// </summary>
+    /// <param name="query">The query to filter the list.</param>
+    /// <returns>A filtered list, can be empty when nothing was found.</returns>
+    public List<Result> Query(Query query)
+    {
+        if (string.IsNullOrEmpty(query.Search)) return [GetResult(query.Search, "Enter a URL", "Please enter a URL")];
+
+
+        // try this with SearchFirst
+        var url = query.Search.Contains(' ') ? query.Search.Split(" ")[0] : query.Search;
+
+        Log.Info("url: " + url, GetType());
+        if (Uri.TryCreate(url, UriKind.Absolute, out var uriResult) &&
+            (uriResult.Scheme == Uri.UriSchemeHttp || uriResult.Scheme == Uri.UriSchemeHttps))
+        {
+            if (query.Search.Contains(' '))
+            {
+                Log.Info("Setting fileanme to " + query.Search.Split(" ", 2)[1], GetType());
+
+                _currentFileName = query.Search.Split(" ", 2)[1];
+            }
+
+            if (_fetchTask == null)
+            {
+                _fetchTask = Task.Run(() => ytdl.RunVideoDataFetch(url, _cts.Token,
+                    overrideOptions: new OptionSet { FormatSort = "quality, hasvid, hasaudio, fps" }));
+                _currentUrl = url;
+            }
+            else if (_currentUrl != url || string.IsNullOrEmpty(url))
+            {
+                _cts.Cancel();
+                _fetchTask = Task.Run(() => ytdl.RunVideoDataFetch(url,
+                    overrideOptions: new OptionSet { FormatSort = "quality, hasvid, hasaudio, fps" }));
+                _currentUrl = url;
+            }
+
+            return
+            [
+                new Result
+                {
+                    QueryTextDisplay = query.Search,
+                    IcoPath = IconPath,
+                    Title = "Best Video+Audio",
+                    Action = _ =>
+                    {
+                        DownloadVideo(
+                            string.IsNullOrEmpty(_currentFileName) ? _fetchTask.Result.Data.Title : _currentFileName,
+                            _currentUrl, "bestvideo+bestaudio/best");
+                        _fetchTask = null;
+                        return true;
+                    }
+                },
+                GetResult(query.Search, "Loading Qualities...", "")
+            ];
+        }
+
+        return [GetResult(query.Search, "Invalid URL", "Please enter a valid URL")];
+    }
+
+    /// <summary>
     ///     Name of the plugin.
     /// </summary>
     public string Name => "YTDLP";
@@ -150,37 +236,6 @@ public class Main : IPlugin, IContextMenu, IDisposable, IDelayedExecutionPlugin
     ///     Description of the plugin.
     /// </summary>
     public string Description => "PowerToys Run plugin for downloading videos from websites with YTDLP";
-
-
-    /// <summary>
-    ///     Return a filtered list, based on the given query.
-    /// </summary>
-    /// <param name="query">The query to filter the list.</param>
-    /// <returns>A filtered list, can be empty when nothing was found.</returns>
-    public List<Result> Query(Query query)
-    {
-        if (string.IsNullOrEmpty(query.Search))
-            return
-            [
-                GetResult("No search query", "Please enter a search query")
-            ];
-
-        return
-        [
-            new Result
-            {
-                QueryTextDisplay = "Best Video+Audio",
-                IcoPath = IconPath,
-                Title = "Best Video+Audio",
-                Action = _ =>
-                {
-                    DownloadVideo("", query.Search, "bestvideo+bestaudio/best");
-                    return true;
-                }
-            },
-            GetResult("Loading Qualities...", "")
-        ];
-    }
 
     /// <summary>
     ///     Initialize the plugin with the given <see cref="PluginInitContext" />.
@@ -197,19 +252,33 @@ public class Main : IPlugin, IContextMenu, IDisposable, IDelayedExecutionPlugin
         UpdateIconPath(Context.API.GetCurrentTheme());
     }
 
-    public Result GetResult(string title, string subtitle)
+    public Control CreateSettingPanel()
+    {
+        return new Control();
+    }
+
+    public void UpdateSettings(PowerLauncherPluginSettings settings)
+    {
+    }
+
+    public IEnumerable<PluginAdditionalOption> AdditionalOptions { get; }
+
+    public Result GetResult(string query, string title, string subtitle)
     {
         return new Result
         {
-            QueryTextDisplay = title,
+            QueryTextDisplay = query,
             IcoPath = IconPath,
             Title = title,
             SubTitle = subtitle
         };
     }
 
-    public void DownloadVideo(string filename, string url, string format)
+    public void DownloadVideo(string? filename, string url, string format)
     {
+        _currentUrl = "";
+        _currentFileName = "";
+
         var progressToast = new ToastContentBuilder()
             .AddText("Downloading Video")
             .AddVisualChild(new AdaptiveProgressBar
@@ -245,7 +314,10 @@ public class Main : IPlugin, IContextMenu, IDisposable, IDelayedExecutionPlugin
 
         Task.Run(async () =>
         {
-            var video = await ytdl.RunVideoDownload(url, format, progress: progress);
+            var video = await ytdl.RunVideoDownload(url, format, progress: progress, overrideOptions: new OptionSet
+            {
+                Output = Path.Combine(ytdl.OutputFolder, filename + ".%(ext)s")
+            }, output: new Progress<string>(s => { Log.Info(s, GetType()); }));
 
             if (video.Success)
             {
@@ -272,6 +344,7 @@ public class Main : IPlugin, IContextMenu, IDisposable, IDelayedExecutionPlugin
                 new ToastContentBuilder()
                     .AddToastActivationInfo("app", ToastActivationType.Foreground)
                     .AddText("Download failed")
+                    .AddText(string.Join("\n", video.ErrorOutput))
                     .AddArgument("error", video.ErrorOutput.ToString())
                     .Show();
             }
