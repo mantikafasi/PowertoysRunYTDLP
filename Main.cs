@@ -27,7 +27,9 @@ internal class ContextData {
 /// </summary>
 public class Main : IPlugin, IContextMenu, IDisposable, IDelayedExecutionPlugin, ISettingProvider {
     private CancellationTokenSource _cts = new();
-    private readonly YoutubeDL _ytdl = new();
+    private readonly YoutubeDL _ytdl = new() {
+        OutputFolder = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) + @"\VideoDownloads"
+    };
     private string? _currentFileName = "";
     private string _currentUrl = "";
 
@@ -48,13 +50,43 @@ public class Main : IPlugin, IContextMenu, IDisposable, IDelayedExecutionPlugin,
     /// </summary>
     /// <param name="context">The <see cref="PluginInitContext" /> for this plugin.</param>
     public void Init(PluginInitContext context) {
-        // TODO dehardcode this
-        _ytdl.YoutubeDLPath = @"C:\tools\yt-dlp.exe";
-        _ytdl.OutputFolder = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) + @"\VideoDownloads";
-
         Context = context ?? throw new ArgumentNullException(nameof(context));
         Context.API.ThemeChanged += OnThemeChanged;
         UpdateIconPath(Context.API.GetCurrentTheme());
+        
+        // check if yt-dlp is in path 
+        var values = Environment.GetEnvironmentVariable("PATH");
+    
+        bool ytDlpFound = false;
+        
+        foreach (var path in values!.Split(Path.PathSeparator)) {
+            if (File.Exists(Path.Combine(path, "yt-dlp.exe"))) {
+                _ytdl.YoutubeDLPath = Path.Combine(path, "yt-dlp.exe");
+                break;
+            }
+            
+            if (File.Exists(Path.Combine(path, "ffmpeg.exe"))) {
+                _ytdl.FFmpegPath = Path.Combine(path, "ffmpeg.exe");
+                break;
+            }
+        }
+        
+        if (!ytDlpFound) {
+            Log.Info("yt-dlp not found in PATH, Downloading", GetType());
+            var task = Utils.DownloadBinaries();
+
+            Task.Run(async () => {
+                await task;
+
+                if (task.IsCompleted) {
+                    new ToastContentBuilder().AddText("Binaries downloaded").Show();
+                }
+                
+                if (task.IsFaulted) {
+                    new ToastContentBuilder().AddText("Error downloading binaries").AddText(task.Exception?.Message).Show();
+                }
+            });
+        }
     }
 
     /// <summary>
@@ -119,7 +151,7 @@ public class Main : IPlugin, IContextMenu, IDisposable, IDelayedExecutionPlugin,
                     Title = "Best Video+Audio",
                     Action = _ => {
                         DownloadVideo(
-                            string.IsNullOrEmpty(_currentFileName) ? _fetchTask.Result.Data.Title : _currentFileName,
+                            string.IsNullOrEmpty(_currentFileName) ? DefaultFilenameFormat : _currentFileName,
                             _currentUrl, "bestvideo+bestaudio/best");
                         return true;
                     }
@@ -176,7 +208,7 @@ public class Main : IPlugin, IContextMenu, IDisposable, IDelayedExecutionPlugin,
                         }
                         
                         DownloadVideo(
-                            string.IsNullOrEmpty(_currentFileName) ? _fetchTask.Result.Data.Title : _currentFileName,
+                            string.IsNullOrEmpty(_currentFileName) ? DefaultFilenameFormat : _currentFileName,
                             _currentUrl!, res.FormatId);
                         return true;
                     },
@@ -209,10 +241,52 @@ public class Main : IPlugin, IContextMenu, IDisposable, IDelayedExecutionPlugin,
         return new Control();
     }
 
-    public void UpdateSettings(PowerLauncherPluginSettings settings) {
+    public void UpdateSettings(PowerLauncherPluginSettings settings)
+    {
+        if (settings.AdditionalOptions != null)
+        {
+            foreach (var option in settings.AdditionalOptions)
+            {
+                if (option.Key == nameof(_ytdl.YoutubeDLPath))
+                {
+                    _ytdl.YoutubeDLPath = option.TextValue;
+                }
+                else if (option.Key == nameof(_ytdl.OutputFolder))
+                {
+                    _ytdl.OutputFolder = option.TextValue;
+                }
+                else if (option.Key == nameof(DefaultFilenameFormat)) {
+                    DefaultFilenameFormat = option.TextValue;
+                }
+            }
+        }
     }
+    
+    public string DefaultFilenameFormat = "%(title)s.%(ext)s";
 
-    public IEnumerable<PluginAdditionalOption> AdditionalOptions { get; }
+    public IEnumerable<PluginAdditionalOption> AdditionalOptions => [
+        new() {
+            Key = nameof(_ytdl.YoutubeDLPath),
+            DisplayLabel = "Path to yt-dlp executable",
+            DisplayDescription = "Leave empty to use the default yt-dlp path",
+            PluginOptionType = PluginAdditionalOption.AdditionalOptionType.Textbox,
+            TextValue = _ytdl.YoutubeDLPath
+        },
+        new() {
+            Key = nameof(_ytdl.OutputFolder),
+            DisplayLabel = "Output folder",
+            DisplayDescription = "Folder to save downloaded videos",
+            PluginOptionType = PluginAdditionalOption.AdditionalOptionType.Textbox,
+            TextValue = _ytdl.OutputFolder
+        },
+        new () {
+            Key = nameof(DefaultFilenameFormat),
+            DisplayLabel = "Default filename format",
+            DisplayDescription = "yt-dlp filename format string",
+            PluginOptionType = PluginAdditionalOption.AdditionalOptionType.Textbox,
+            TextValue = DefaultFilenameFormat
+        }
+    ];
 
     public Result GetResult(string query, string title, string subtitle) {
         return new Result {
@@ -230,7 +304,7 @@ public class Main : IPlugin, IContextMenu, IDisposable, IDelayedExecutionPlugin,
         var progressToast = new ToastContentBuilder()
             .AddText("Downloading Video")
             .AddVisualChild(new AdaptiveProgressBar {
-                Title = filename,
+                Title = filename == DefaultFilenameFormat ? "" : filename,
                 Value = new BindableProgressBarValue("progressValue"),
                 Status = "Downloading..."
             }).GetToastContent();
