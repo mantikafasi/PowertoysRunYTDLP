@@ -97,18 +97,7 @@ public class Main : IPlugin, IContextMenu, IDisposable, IDelayedExecutionPlugin,
     public List<ContextMenuResult> LoadContextMenus(Result selectedResult) {
         if (selectedResult.ContextData is string search)
             return [
-                new ContextMenuResult {
-                    PluginName = Name,
-                    Title = "Copy to clipboard (Ctrl+C)",
-                    FontFamily = "Segoe MDL2 Assets",
-                    Glyph = "\xE8C8", // Copy
-                    AcceleratorKey = Key.C,
-                    AcceleratorModifiers = ModifierKeys.Control,
-                    Action = _ => {
-                        Clipboard.SetDataObject(search);
-                        return true;
-                    }
-                }
+
             ];
 
         return [];
@@ -297,7 +286,7 @@ public class Main : IPlugin, IContextMenu, IDisposable, IDelayedExecutionPlugin,
         };
     }
 
-    private async Task DownloadVideo(string? filename, string url, string format) {
+    private async Task DownloadVideo(string filename, string url, string format) {
         _currentUrl = "";
         _currentFileName = "";
 
@@ -330,19 +319,25 @@ public class Main : IPlugin, IContextMenu, IDisposable, IDelayedExecutionPlugin,
             ToastNotificationManagerCompat.CreateToastNotifier().Update(toast.Data, "yt-dlp-download");
         });
 
+        var output = filename!.Contains(".") ? filename : filename + ".%(ext)s";
+        
         var video = await _ytdl.RunVideoDownload(url, format, progress: progress, overrideOptions: new OptionSet {
-            Output = Path.Combine(_ytdl.OutputFolder, filename + ".%(ext)s")
+            Output = Path.Combine(_ytdl.OutputFolder, output)
         }, output: new Progress<string>(s => { Log.Info(s, GetType()); }));
 
         if (video.Success) {
             Log.Info("Download complete: " + video.Data, GetType());
 
-            ToastNotificationManagerCompat.OnActivated += toastArgs => {
+            OnActivated? ev = null;
+            
+            ev = toastArgs => {
                 Log.Info(toastArgs.Argument, GetType());
                 var args = ToastArguments.Parse(toastArgs.Argument);
                 Process.Start("explorer.exe", "/select, \"" + video.Data + "\"");
+                ToastNotificationManagerCompat.OnActivated -= ev;
             };
-
+            ToastNotificationManagerCompat.OnActivated += ev;
+            
             new ToastContentBuilder()
                 .AddToastActivationInfo("app", ToastActivationType.Foreground)
                 .AddText("Download complete")
